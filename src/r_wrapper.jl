@@ -340,6 +340,144 @@ function _calculate_and_save_indicators(fpath::String, scenario_id::Int, draw_va
 end
 
 
+"""
+    process_cscape_outputs(fpath; scenario_ids, export_adria, calc_indicators, overwrite) -> CScapeResultSet
+
+Process pre-existing CScape out_array RDS files in `fpath/model_outputs/` without
+re-running the simulation. Generates indicator and/or ADRIA export JLD2 files for each
+discovered file, then loads and returns a `CScapeResultSet`.
+
+Scenarios whose indicator file already exists in `adria_exports/` are skipped unless
+`overwrite=true`.
+
+# Arguments
+- `fpath`: Data directory with standard structure (`model_outputs/`, `adria_exports/`,
+  `data/`, `ScenarioID.xlsx`)
+- `scenario_ids`: Optional filter; default processes all RDS files found
+- `export_adria`: Save full `CscapeOutput` to `adria_*.jld2` (large files; default `false`)
+- `calc_indicators`: Compute and save `Indicators_*.jld2` (default `true`)
+- `overwrite`: Recompute even if the indicator file already exists (default `false`)
+
+# Example
+```julia
+setup_r_environment(fun_path)
+rs = process_cscape_outputs("/path/to/data")
+rs = process_cscape_outputs("/path/to/data"; scenario_ids=1:10, export_adria=true)
+```
+"""
+function process_cscape_outputs(fpath::String;
+    scenario_ids::Union{Nothing,AbstractVector{Int}} = nothing,
+    export_adria::Bool = false,
+    calc_indicators::Bool = true,
+    overwrite::Bool = false
+)
+    output_dir = joinpath(fpath, "model_outputs")
+    adria_dir  = joinpath(fpath, "adria_exports")
+    mkpath(adria_dir)
+
+    rds_pattern = r"Array_scenario_(\d+)_draw_(.+)\.rds"
+    all_files = readdir(output_dir)
+    matched = filter(f -> occursin(rds_pattern, f), all_files)
+
+    scenarios = map(matched) do f
+        m = match(rds_pattern, f)
+        (scenario_id=parse(Int, m[1]), draw=String(m[2]))
+    end
+
+    if !isnothing(scenario_ids)
+        scenarios = filter(s -> s.scenario_id ∈ scenario_ids, scenarios)
+    end
+
+    if !overwrite
+        scenarios = filter(scenarios) do s
+            ind_file = joinpath(adria_dir, "Indicators_scenario_$(s.scenario_id)_draw_$(s.draw).jld2")
+            !isfile(ind_file)
+        end
+    end
+
+    @info "Processing $(length(scenarios)) scenario(s) from $output_dir"
+
+    for s in scenarios
+        try
+            output = load_output(fpath, s.scenario_id; draw=s.draw)
+
+            if calc_indicators
+                indicators = calculate_indicators(output)
+                ind_path = joinpath(adria_dir, "Indicators_scenario_$(s.scenario_id)_draw_$(s.draw).jld2")
+                @info "Saving indicators to $ind_path"
+                save_indicators(indicators, output, ind_path)
+                indicator_summary(indicators)
+            end
+
+            if export_adria
+                adria_path = joinpath(adria_dir, "adria_scenario_$(s.scenario_id)_draw_$(s.draw).jld2")
+                @info "Exporting ADRIA output to $adria_path"
+                export_for_adria(output, adria_path)
+            end
+        catch e
+            @warn "Failed to process scenario $(s.scenario_id) draw $(s.draw)" exception=(e, catch_backtrace())
+        end
+    end
+
+    return load_results(CScapeResultSet, fpath)
+end
+
+
+"""
+    run_cscape_parallel(scenario_ids, fpath, fun_path; n_workers, export_adria, calc_indicators) -> Vector{Int}
+
+Run multiple C-scape scenarios in parallel using `pmap`. Spawns Julia workers, loads
+`CscapeInterface` on each, runs the scenarios, then cleans up workers.
+
+# Arguments
+- `scenario_ids`: IDs to run (e.g. `1:100` or `[2, 5, 7]`)
+- `fpath`: Data directory passed to `run_cscape`
+- `fun_path`: C_scape source directory passed to `setup_r_environment`
+- `n_workers`: Number of worker processes (default: `Sys.CPU_THREADS - 1`)
+- `export_adria`: Passed to `run_cscape` (default `true`)
+- `calc_indicators`: Passed to `run_cscape` (default `true`)
+
+# Returns
+Vector of scenario IDs that failed (empty if all succeeded).
+
+# Example
+```julia
+failed = run_cscape_parallel(1:100, fpath, fun_path)
+```
+"""
+function run_cscape_parallel(scenario_ids, fpath::String, fun_path::String;
+    n_workers::Int = max(1, Sys.CPU_THREADS - 1),
+    export_adria::Bool = true,
+    calc_indicators::Bool = true
+)
+    addprocs(n_workers)
+    try
+        @sync for p in workers()
+            @async remotecall_wait(Core.eval, p, Main, :(using CscapeInterface))
+        end
+
+        @info "Running $(length(scenario_ids)) scenario(s) across $n_workers worker(s)"
+
+        failed = pmap(scenario_ids) do sid
+            result = try
+                setup_r_environment(fun_path; enable_parallel=false)
+                run_cscape(sid, fpath; export_adria=export_adria, calc_indicators=calc_indicators)
+                nothing
+            catch e
+                @error "Scenario $sid failed" exception=e
+                sid
+            end
+            result
+        end |> x -> filter(!isnothing, x)
+
+        isempty(failed) ? @info("All scenarios complete") : @warn("Failed scenarios: $failed")
+        return failed
+    finally
+        rmprocs(workers())
+    end
+end
+
+
 # =============================================================================
 # MAIN SIMULATION FUNCTIONS
 # =============================================================================

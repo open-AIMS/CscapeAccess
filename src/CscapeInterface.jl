@@ -80,6 +80,12 @@ using Distributed
 using CSV
 using Printf
 using TimerOutputs
+using Dates
+using YAXArrays
+using DimensionalData: Dim
+using JLD2
+using WGLMakie
+import ADRIA
 
 
 # Include source files
@@ -88,7 +94,9 @@ include("r_wrapper.jl")        # Call R, modify inputs
 include("data_access.jl")      # Load outputs, yearly access
 include("indicators.jl")       # ADRIAIndicators integration
 include("cscape_result_io.jl") # Multi-scenario ResultSet
-include("dynamic_ranking.jl")   # Dynamic MCDA re-ranking workflow
+include("dynamic_ranking.jl")  # Dynamic MCDA re-ranking workflow
+include("scenario_setup.jl")   # ScenarioID table construction
+include("adria_analysis.jl")   # PAWN + ADRIA sensitivity workflow
 
 # Exports - Types
 export CscapeParams, CscapeOutput, CScapeResultSet
@@ -114,6 +122,8 @@ export set_params!
 export setup_r_environment
 export load_input_data, modify_input_data!, load_reef_spatial, modify_reef_spatial!
 export run_cscape, run_cscape_modified, setup_interventions
+export process_cscape_outputs, run_cscape_parallel
+export setup_counterfactuals, build_scenario_table
 
 # Exports - Per-timestep control
 export initialise_simulation, run_single_year!, run_years!
@@ -142,6 +152,9 @@ export compute_rankings
 export compute_rankings_from_cover
 export MCDA_PREFS              # if kept as module-level const
 
+
+# Exports - ADRIA sensitivity workflow
+export run_adria_pawn
 
 # Re-export ADRIA ResultSet interface helpers (not exported by ADRIA itself)
 import ADRIA: n_locations, n_scenarios, loc_k_area, loc_k
